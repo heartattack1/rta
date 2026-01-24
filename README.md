@@ -1,4 +1,3 @@
-Зумер, [24.01.2026 23:37]
 # Real-Time Meeting Assistant MVP
 
 ## Обзор
@@ -84,7 +83,7 @@ transcript.txt
 [00:00:15] So the main issue with the current implementation...
 [00:00:23] Right, I see.
 
-Зумер, [24.01.2026 23:37]
+
 What about the authentication flow?
 [00:00:31] We should probably refactor that part first.
 ...
@@ -218,7 +217,7 @@ Output:
 
 ### 5. Overlay UI
 
-Зумер, [24.01.2026 23:37]
+
 Назначение: Always-on-top окно с подсказками.
 
 Требования:
@@ -412,7 +411,7 @@ overlay:
 1. Hint agent instant mode
 1.
 
-Зумер, [24.01.2026 23:37]
+
 Hint agent deep mode
 1. Dual-response logic (instant + deep)
 1. Trigger detection (имя, вопросительная интонация)
@@ -578,7 +577,7 @@ If your analysis differs significantly from the instant hint, clearly highlight 
 1. Латентность instant hint: < 3 секунд от нажатия горячей клавиши
 1.
 
-Зумер, [24.01.2026 23:37]
+
 Точность транскрипции: Понятно, о чём речь (не требуется 100% точность)
 1. Полезность подсказок: Хотя бы 50% подсказок реально помогают
 1. Стабильность: Работает без крашей 1+ час
