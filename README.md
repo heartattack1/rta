@@ -66,3 +66,15 @@ packages/
       toolrun.schema.json
       project.schema.json
 ```
+
+## Tooler: git-autocommit
+
+`tooler` supports a `git-autocommit` tool run that:
+
+- validates `.git` in `input.workdir`,
+- checks out/creates `autobot/YYYY-MM-DD`,
+- runs `git add -A` and commits with `input.subject`,
+- optionally pushes when `GIT_PUSH=true` (default in dev: disabled).
+
+Returned run payload includes `branch` and `commit_hash`, and the same values are appended to `artifacts`.
+

@@ -5,6 +5,7 @@ import subprocess
 import threading
 import time
 import uuid
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -37,12 +38,81 @@ class ToolRun:
     finished_at: float | None = None
     callback_sent: bool = False
     startup_error: str | None = None
+    branch: str | None = None
+    commit_hash: str | None = None
 
 
 @dataclass(frozen=True)
 class ToolAdapterResult:
     command: list[str] | None = None
     startup_error: str | None = None
+
+
+def _build_git_autocommit_adapter(payload: dict[str, Any]) -> ToolAdapterResult:
+    workdir_raw = str(payload.get("workdir", os.getcwd())).strip()
+    if not workdir_raw:
+        abort(400, description="Field 'input.workdir' must be a non-empty string")
+
+    workdir = Path(workdir_raw).expanduser().resolve()
+    if not workdir.exists() or not workdir.is_dir():
+        abort(400, description="Field 'input.workdir' must point to an existing directory")
+
+    if not (workdir / ".git").exists():
+        return ToolAdapterResult(startup_error=f"Directory '{workdir}' is not a git repository")
+
+    subject = str(payload.get("subject", "chore: autobot update")).strip()
+    if not subject:
+        abort(400, description="Field 'input.subject' must be a non-empty string")
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    branch = f"autobot/{today}"
+    push_enabled = os.getenv("GIT_PUSH", "false").strip().lower() in {"1", "true", "yes"}
+
+    script = """
+import subprocess
+import sys
+
+workdir, branch, subject, push_enabled = sys.argv[1:5]
+
+def run(*args: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", workdir, *args],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    return completed.stdout.strip()
+
+run("checkout", "-B", branch)
+run("add", "-A")
+
+has_staged_changes = subprocess.run(
+    ["git", "-C", workdir, "diff", "--cached", "--quiet"],
+    check=False,
+).returncode != 0
+
+if has_staged_changes:
+    run("commit", "-m", subject)
+
+commit_hash = run("rev-parse", "HEAD")
+print(f"__BRANCH__={branch}")
+print(f"__COMMIT_HASH__={commit_hash}")
+
+if push_enabled == "1":
+    run("push", "origin", branch)
+""".strip()
+
+    return ToolAdapterResult(
+        command=[
+            "python",
+            "-c",
+            script,
+            str(workdir),
+            branch,
+            subject,
+            "1" if push_enabled else "0",
+        ]
+    )
 
 
 def _build_dummy_adapter(payload: dict[str, Any]) -> ToolAdapterResult:
@@ -72,6 +142,7 @@ def _build_codex_adapter(payload: dict[str, Any]) -> ToolAdapterResult:
 TOOL_ADAPTERS: dict[str, Any] = {
     "dummy": _build_dummy_adapter,
     "codex": _build_codex_adapter,
+    "git-autocommit": _build_git_autocommit_adapter,
 }
 
 
@@ -228,7 +299,20 @@ def _runner_thread(run_id: str, command: list[str] | None) -> None:
         run.finished_at = time.time()
         run.status = "SUCCEEDED" if exit_code == 0 else "FAILED"
         run.process = None
-        _send_callback(run)
+
+    if run.tool_name == "git-autocommit" and run.stdout_path.exists():
+        for line in run.stdout_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("__BRANCH__="):
+                run.branch = line.split("=", 1)[1].strip() or None
+            if line.startswith("__COMMIT_HASH__="):
+                run.commit_hash = line.split("=", 1)[1].strip() or None
+
+        if run.branch and f"branch:{run.branch}" not in run.artifacts:
+            run.artifacts.append(f"branch:{run.branch}")
+        if run.commit_hash and f"commit_hash:{run.commit_hash}" not in run.artifacts:
+            run.artifacts.append(f"commit_hash:{run.commit_hash}")
+
+    _send_callback(run)
 
 
 
@@ -333,6 +417,8 @@ def get_tool_run(tool_run_id: str) -> tuple:
                 "exit_code": run.exit_code,
                 "started_at": run.started_at,
                 "finished_at": run.finished_at,
+                "branch": run.branch,
+                "commit_hash": run.commit_hash,
             }
         ),
         200,
