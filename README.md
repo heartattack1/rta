@@ -78,3 +78,22 @@ packages/
 
 Returned run payload includes `branch` and `commit_hash`, and the same values are appended to `artifacts`.
 
+
+## TTS service
+
+`tts` accepts:
+
+- `POST /tts` with body `{ "text": "...", "task_id": "optional" }`
+- legacy alias `POST /tts/synthesize`
+
+Response:
+
+```json
+{ "audio_uri": "storage/tts/<task_id>.ogg" }
+```
+
+Modes:
+
+- `TTS_PROVIDER=mock` (default): writes placeholder `.wav` and `.ogg` files.
+- `TTS_PROVIDER=silero`: runs SileroTTS on CPU, writes `.wav`, then converts to OGG/Opus via `ffmpeg`.
+

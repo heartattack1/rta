@@ -384,7 +384,7 @@ def process_task(task_id: str) -> None:
                 update_task_internal(connection, task_id, final_summary=summary_text, status="TTS_GENERATING")
                 connection.commit()
             tts_result = post_json(
-                f"{TTS_URL.rstrip('/')}/tts/synthesize",
+                f"{TTS_URL.rstrip('/')}/tts",
                 {"text": summary_text, "task_id": task_id},
             )
             final_audio_uri = str(tts_result.get("audio_uri", "")).strip()
