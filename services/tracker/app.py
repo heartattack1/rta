@@ -364,10 +364,17 @@ def process_task(task_id: str) -> None:
             f"{SUMMARIZER_URL.rstrip('/')}/summarize",
             {
                 "task_id": task_id,
-                "text": str(tool_result.get("result_text") or refined_text),
+                "refined_text": refined_text,
+                "tool_stdout": str(tool_result.get("result_text") or ""),
+                "tool_stderr": str(tool_result.get("stderr") or ""),
+                "mode": "audio" if task_row["input_type"] == "voice" else "text",
             },
         )
-        summary_text = str(summarize_result.get("summary", "")).strip()
+        summary_text = str(
+            summarize_result.get("summary_text")
+            or summarize_result.get("summary")
+            or ""
+        ).strip()
         if not summary_text:
             raise RuntimeError("Summarizer returned empty summary")
 
