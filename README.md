@@ -224,3 +224,48 @@ docker compose up --build -d
 - `services/tooler/` — запуск инструментов, включая `git-autocommit`.
 - `services/asr/`, `services/refine/`, `services/summarizer/`, `services/tts/` — этапы обработки.
 - `packages/contracts/` — контракты и схемы.
+
+
+## Codex CLI integration
+
+`tooler` now supports `tool_name=codex` and executes tasks through `codex exec` in non-interactive mode. Authentication for this path is **only** via ChatGPT login (`codex login`) with local credential cache reuse.
+
+1. Install Codex CLI on your host machine (recommended):
+
+```bash
+npm i -g @openai/codex
+```
+
+2. Authenticate once on host:
+
+```bash
+codex login
+```
+
+Codex stores cached credentials locally (commonly `~/.codex/auth.json`). Treat this file like a password/token and never commit it to git.
+
+3. Start Docker Compose with credential mount (already included in `docker-compose.yml`):
+
+```yaml
+services:
+  tooler:
+    environment:
+      CODEX_HOME: /codex-home
+    volumes:
+      - ~/.codex:/codex-home:ro
+```
+
+`tooler` will read credentials from `CODEX_HOME` inside container and run `codex exec --cd <workdir> ...`.
+
+### Safety defaults
+
+- Default mode is least-privilege: `TOOLER_CODEX_MODE=readonly` (`--sandbox read-only`).
+- Full automation must be explicitly enabled with `TOOLER_CODEX_MODE=full-auto` (or per-request `input.mode=full-auto`).
+- Optional model override: `TOOLER_CODEX_MODEL=<model>`.
+- CI/local deterministic mock mode: `TOOLER_CODEX_MOCK=1` (does not call real codex binary).
+
+### Troubleshooting
+
+- **Not authenticated / missing credentials**: run `codex login` on host, then ensure `~/.codex` is mounted into `/codex-home` and `CODEX_HOME=/codex-home`.
+- **Headless environment for login**: use device flow on host: `codex login --device-auth`.
+- **Workdir is not a git repo**: Codex expects a git repository by default. Point `input.workdir` to a repo, or explicitly opt in to `input.skip_git_repo_check=true`.

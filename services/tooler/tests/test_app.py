@@ -95,15 +95,22 @@ def test_callback_sent_on_finish(monkeypatch):
     assert isinstance(received["artifacts"], list)
 
 
-def test_codex_tool_without_key_fails_gracefully(monkeypatch):
+def test_codex_tool_missing_binary_fails_gracefully(monkeypatch, tmp_path):
     import app as tooler_app
 
-    monkeypatch.setattr(tooler_app, "CODEX_API_KEY", "")
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    monkeypatch.setattr(tooler_app, "TOOLER_CODEX_MOCK", False)
+    monkeypatch.setattr(tooler_app, "CODEX_HOME", tmp_path / "missing-auth")
+    monkeypatch.setattr(tooler_app.shutil, "which", lambda _: None)
+
     client = tooler_app.app.test_client()
 
     create_response = client.post(
         "/tool-runs",
-        json={"tool_name": "codex", "input": {"prompt": "summarize this"}},
+        json={"tool_name": "codex", "input": {"prompt": "summarize this", "workdir": str(repo_dir)}},
     )
 
     assert create_response.status_code == 201
@@ -120,13 +127,48 @@ def test_codex_tool_without_key_fails_gracefully(monkeypatch):
     assert final is not None
     assert final["status"] == "FAILED"
     assert final["exit_code"] == -1
-    assert "not configured" in final["stderr_tail"]
+    assert "binary is not available" in final["stderr_tail"]
+
+
+def test_codex_tool_missing_auth_fails_gracefully(monkeypatch, tmp_path):
+    import app as tooler_app
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    monkeypatch.setattr(tooler_app, "TOOLER_CODEX_MOCK", False)
+    monkeypatch.setattr(tooler_app, "CODEX_HOME", tmp_path / "missing-auth")
+    monkeypatch.setattr(tooler_app.shutil, "which", lambda _: "/usr/local/bin/codex")
+
+    client = tooler_app.app.test_client()
+
+    create_response = client.post(
+        "/tool-runs",
+        json={"tool_name": "codex", "input": {"prompt": "summarize this", "workdir": str(repo_dir)}},
+    )
+
+    assert create_response.status_code == 201
+    run_id = create_response.get_json()["tool_run_id"]
+
+    final = None
+    for _ in range(20):
+        payload = client.get(f"/tool-runs/{run_id}").get_json()
+        if payload["status"] in {"SUCCEEDED", "FAILED"}:
+            final = payload
+            break
+        time.sleep(0.05)
+
+    assert final is not None
+    assert final["status"] == "FAILED"
+    assert final["exit_code"] == -1
+    assert "not authenticated" in final["stderr_tail"]
 
 
 def test_codex_tool_requires_prompt(monkeypatch):
     import app as tooler_app
 
-    monkeypatch.setattr(tooler_app, "CODEX_API_KEY", "test-key")
+    monkeypatch.setattr(tooler_app, "TOOLER_CODEX_MOCK", True)
     client = tooler_app.app.test_client()
 
     response = client.post("/tool-runs", json={"tool_name": "codex", "input": {}})
@@ -134,6 +176,31 @@ def test_codex_tool_requires_prompt(monkeypatch):
     assert response.status_code == 400
     payload = response.get_json()
     assert "input.prompt" in payload["message"]
+
+
+def test_tooler_run_sync_codex_mock(monkeypatch, tmp_path):
+    import app as tooler_app
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    monkeypatch.setattr(tooler_app, "TOOLER_CODEX_MOCK", True)
+    client = tooler_app.app.test_client()
+
+    response = client.post(
+        "/tooler/run",
+        json={
+            "tool_name": "codex",
+            "input": {"prompt": "run mock", "workdir": str(repo_dir), "mode": "readonly"},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["tool"] == "codex"
+    assert payload["exit_code"] == 0
+    assert "deterministic output" in payload["result_text"]
 
 def test_git_autocommit_creates_branch_and_commit(tmp_path, monkeypatch):
     import subprocess
