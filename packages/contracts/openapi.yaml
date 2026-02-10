@@ -1,0 +1,14 @@
+openapi: 3.1.0
+info:
+  title: RTA Contracts
+  version: 0.1.0
+  description: Minimal DTO contracts for core tracker and tooling flows.
+
+components:
+  schemas:
+    Task:
+      $ref: ./schemas/task.schema.json
+    ToolRun:
+      $ref: ./schemas/toolrun.schema.json
+    Project:
+      $ref: ./schemas/project.schema.json
