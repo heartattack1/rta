@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     )),
     final_summary TEXT,
     final_audio_uri TEXT,
+    failure_reason TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE

@@ -115,6 +115,15 @@ def health() -> tuple:
     return jsonify({"status": "ok", "service": SERVICE_NAME}), 200
 
 
+
+
+@app.post("/callbacks/task-result")
+def task_result_callback() -> tuple:
+    payload = request.get_json(silent=True) or {}
+    app.logger.info("Task callback received: %s", payload)
+    return jsonify({"ok": True}), 200
+
+
 @app.post("/webhook")
 def telegram_webhook() -> tuple:
     update = request.get_json(silent=True) or {}
