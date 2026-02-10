@@ -1,6 +1,7 @@
 import json
 import os
 import pwd
+import shutil
 import subprocess
 import threading
 import time
@@ -18,7 +19,10 @@ SERVICE_NAME = os.getenv("SERVICE_NAME", "service")
 ARTIFACTS_DIR = Path(os.getenv("TOOLER_ARTIFACTS_DIR", "/tmp/tooler-artifacts"))
 RUN_AS_USER = os.getenv("TOOLER_RUN_AS_USER", "").strip()
 TAIL_LINES = int(os.getenv("TOOLER_TAIL_LINES", "40"))
-CODEX_API_KEY = os.getenv("CODEX_API_KEY", "").strip()
+CODEX_HOME = Path(os.getenv("CODEX_HOME", "/codex-home")).expanduser()
+TOOLER_CODEX_MODE = os.getenv("TOOLER_CODEX_MODE", "readonly").strip().lower() or "readonly"
+TOOLER_CODEX_MODEL = os.getenv("TOOLER_CODEX_MODEL", "").strip()
+TOOLER_CODEX_MOCK = os.getenv("TOOLER_CODEX_MOCK", "").strip().lower() in {"1", "true", "yes"}
 
 
 @dataclass
@@ -124,19 +128,76 @@ def _build_codex_adapter(payload: dict[str, Any]) -> ToolAdapterResult:
     if not prompt:
         abort(400, description="Field 'input.prompt' is required for tool 'codex'")
 
-    if not CODEX_API_KEY:
+    workdir_raw = str(payload.get("workdir", os.getcwd())).strip()
+    if not workdir_raw:
+        abort(400, description="Field 'input.workdir' must be a non-empty string")
+
+    workdir = Path(workdir_raw).expanduser().resolve()
+    if not workdir.exists() or not workdir.is_dir():
+        abort(400, description="Field 'input.workdir' must point to an existing directory")
+
+    skip_git_repo_check = bool(payload.get("skip_git_repo_check", False))
+    if not skip_git_repo_check and not (workdir / ".git").exists():
         return ToolAdapterResult(
             startup_error=(
-                "Tool 'codex' is not configured: set CODEX_API_KEY environment variable"
+                "Codex requires a Git repository workdir. "
+                "Point 'input.workdir' to a Git repo, or explicitly opt-in to skip with "
+                "'input.skip_git_repo_check=true'."
             )
         )
 
-    script = (
-        "echo \"codex tool invoked\"; "
-        "echo \"prompt: {prompt}\"; "
-        "echo \"CODEX_API_KEY is configured\""
-    ).format(prompt=prompt.replace('"', "'"))
-    return ToolAdapterResult(command=["bash", "-c", script])
+    if TOOLER_CODEX_MOCK:
+        return ToolAdapterResult(
+            command=[
+                "bash",
+                "-lc",
+                "echo 'codex-mock: deterministic output'; echo 'progress: mock runner' >&2",
+            ]
+        )
+
+    if shutil.which("codex") is None:
+        return ToolAdapterResult(
+            startup_error=(
+                "Codex CLI binary is not available in tooler container. "
+                "Install @openai/codex so 'codex exec' can run."
+            )
+        )
+
+    auth_file = CODEX_HOME / "auth.json"
+    if not auth_file.exists():
+        return ToolAdapterResult(
+            startup_error=(
+                "Codex is not authenticated. Run `codex login` on the host and mount ~/.codex "
+                "into tooler (CODEX_HOME)."
+            )
+        )
+
+    mode = str(payload.get("mode") or TOOLER_CODEX_MODE).strip().lower() or "readonly"
+    if mode not in {"readonly", "full-auto"}:
+        abort(400, description="Field 'input.mode' must be one of: readonly, full-auto")
+
+    model = str(payload.get("model") or TOOLER_CODEX_MODEL).strip()
+    approval_policy = str(payload.get("approval_policy", "")).strip()
+    json_output = bool(payload.get("json", False))
+
+    command = ["codex", "exec", "--cd", str(workdir)]
+    if model:
+        command.extend(["--model", model])
+    if approval_policy:
+        command.extend(["--approval-policy", approval_policy])
+
+    if mode == "full-auto":
+        command.append("--full-auto")
+    else:
+        command.extend(["--sandbox", "read-only"])
+
+    if skip_git_repo_check:
+        command.append("--skip-git-repo-check")
+    if json_output:
+        command.append("--json")
+
+    command.append(prompt)
+    return ToolAdapterResult(command=command)
 
 
 TOOL_ADAPTERS: dict[str, Any] = {
@@ -199,7 +260,13 @@ def _run_sync_tool(tool_name: str, input_payload: dict[str, Any]) -> dict[str, A
     if command is None:
         abort(500, description=f"Tool '{tool_name}' command is not configured")
 
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "CODEX_HOME": str(CODEX_HOME)},
+    )
     stdout_text = completed.stdout or ""
     stderr_text = completed.stderr or ""
 
@@ -230,6 +297,17 @@ def _run_sync_tool(tool_name: str, input_payload: dict[str, Any]) -> dict[str, A
             response["commit_hash"] = commit_hash
 
     if completed.returncode != 0:
+        if tool_name == "codex":
+            stderr_lower = stderr_text.lower()
+            auth_markers = ("not authenticated", "login", "unauthorized", "auth")
+            if any(marker in stderr_lower for marker in auth_markers):
+                abort(
+                    500,
+                    description=(
+                        "Codex is not authenticated. Run `codex login` on the host and mount "
+                        "~/.codex into tooler (CODEX_HOME)."
+                    ),
+                )
         abort(500, description=(stderr_text.strip() or "Tool execution failed"))
 
     return response
@@ -327,6 +405,7 @@ def _runner_thread(run_id: str, command: list[str] | None) -> None:
                 stderr=stderr_file,
                 text=True,
                 preexec_fn=preexec_fn,
+                env={**os.environ, "CODEX_HOME": str(CODEX_HOME)},
             )
         except Exception as error:
             run.status = "FAILED"

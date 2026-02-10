@@ -33,8 +33,13 @@ services:
       SERVICE_NAME: tooler
       TOOLER_ARTIFACTS_DIR: /tmp/tooler-artifacts
       GIT_PUSH: "false"
+      CODEX_HOME: /codex-home
+      TOOLER_CODEX_MODE: ${TOOLER_CODEX_MODE:-readonly}
+      TOOLER_CODEX_MODEL: ${TOOLER_CODEX_MODEL:-}
+      TOOLER_CODEX_MOCK: ${TOOLER_CODEX_MOCK:-0}
     volumes:
       - ./:/workspace/rta
+      - ~/.codex:/codex-home:ro
     ports:
       - "8003:8000"
 
