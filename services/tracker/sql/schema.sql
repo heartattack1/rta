@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     )),
     final_summary TEXT,
     final_audio_uri TEXT,
+    source_chat_id INTEGER,
     failure_reason TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,

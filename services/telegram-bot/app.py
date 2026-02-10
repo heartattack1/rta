@@ -57,11 +57,12 @@ def ensure_project_id() -> str:
     return _cached_project_id
 
 
-def create_task(payload: dict[str, Any]) -> None:
+def create_task(payload: dict[str, Any]) -> dict[str, Any]:
     project_id = ensure_project_id()
     body = {"project_id": project_id, **payload}
     response = requests.post(tracker_tasks_url(), json=body, timeout=_request_timeout)
     response.raise_for_status()
+    return response.json()
 
 
 def fetch_voice_file_path(file_id: str) -> str:
@@ -90,7 +91,8 @@ def handle_text_message(message: dict[str, Any]) -> None:
     if not text:
         return
 
-    create_task({"input_type": "text", "raw_text": text})
+    chat_id = (message.get("chat") or {}).get("id")
+    create_task({"input_type": "text", "raw_text": text, "source_chat_id": chat_id})
 
 
 def handle_voice_message(message: dict[str, Any]) -> None:
@@ -99,9 +101,36 @@ def handle_voice_message(message: dict[str, Any]) -> None:
     if not file_id:
         return
 
+    chat_id = (message.get("chat") or {}).get("id")
     file_path = fetch_voice_file_path(file_id)
     stored = download_file(file_path)
-    create_task({"input_type": "voice", "raw_audio_uri": str(stored)})
+    create_task({"input_type": "voice", "raw_audio_uri": str(stored), "source_chat_id": chat_id})
+
+
+
+
+def send_task_result(chat_id: int, summary: str, audio_uri: str | None = None) -> None:
+    if not TELEGRAM_TOKEN:
+        app.logger.warning("TELEGRAM_TOKEN not configured: skip task result")
+        return
+
+    if audio_uri:
+        local_path = Path(audio_uri)
+        if local_path.exists():
+            with local_path.open("rb") as voice_file:
+                requests.post(
+                    telegram_api_url("sendVoice"),
+                    data={"chat_id": chat_id, "caption": summary or "готово"},
+                    files={"voice": voice_file},
+                    timeout=_request_timeout,
+                ).raise_for_status()
+            return
+
+    requests.post(
+        telegram_api_url("sendMessage"),
+        json={"chat_id": chat_id, "text": summary or "готово"},
+        timeout=_request_timeout,
+    ).raise_for_status()
 
 
 @app.errorhandler(requests.RequestException)
@@ -121,6 +150,11 @@ def health() -> tuple:
 def task_result_callback() -> tuple:
     payload = request.get_json(silent=True) or {}
     app.logger.info("Task callback received: %s", payload)
+
+    chat_id = payload.get("chat_id")
+    if chat_id is not None:
+        send_task_result(int(chat_id), str(payload.get("summary") or "готово"), payload.get("audio_uri"))
+
     return jsonify({"ok": True}), 200
 
 

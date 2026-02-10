@@ -22,6 +22,9 @@ SUMMARIZER_URL = os.getenv("SUMMARIZER_URL", "http://summarizer:8000")
 TTS_URL = os.getenv("TTS_URL", "http://tts:8000")
 BOT_CALLBACK_URL = os.getenv("BOT_CALLBACK_URL", "")
 UPSTREAM_TIMEOUT_SECONDS = float(os.getenv("UPSTREAM_TIMEOUT_SECONDS", "20"))
+SYNC_TOOL_NAME = os.getenv("SYNC_TOOL_NAME", "dummy").strip() or "dummy"
+SYNC_GIT_WORKDIR = os.getenv("SYNC_GIT_WORKDIR", "").strip()
+SYNC_GIT_SUBJECT_PREFIX = os.getenv("SYNC_GIT_SUBJECT_PREFIX", "chore(voice):").strip()
 
 TASK_STATES = [
     "RECEIVED",
@@ -89,6 +92,8 @@ def init_db() -> None:
         }
         if "failure_reason" not in columns:
             connection.execute("ALTER TABLE tasks ADD COLUMN failure_reason TEXT")
+        if "source_chat_id" not in columns:
+            connection.execute("ALTER TABLE tasks ADD COLUMN source_chat_id INTEGER")
         connection.commit()
 
 
@@ -109,6 +114,7 @@ def row_to_task(row: sqlite3.Row, connection: sqlite3.Connection) -> dict[str, A
         "final_summary": row["final_summary"],
         "final_audio_uri": row["final_audio_uri"],
         "failure_reason": row["failure_reason"],
+        "source_chat_id": row["source_chat_id"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -344,9 +350,18 @@ def process_task(task_id: str) -> None:
             )
             connection.commit()
 
+        tool_input: dict[str, Any] = {"message": refined_text}
+        if SYNC_TOOL_NAME == "git-autocommit":
+            if not SYNC_GIT_WORKDIR:
+                raise RuntimeError("SYNC_GIT_WORKDIR must be set when SYNC_TOOL_NAME=git-autocommit")
+            tool_input = {
+                "workdir": SYNC_GIT_WORKDIR,
+                "subject": f"{SYNC_GIT_SUBJECT_PREFIX} {refined_text[:72]}".strip(),
+            }
+
         tool_result = post_json(
             f"{TOOLER_URL.rstrip('/')}/tooler/run",
-            {"task_id": task_id, "text": refined_text},
+            {"task_id": task_id, "tool_name": SYNC_TOOL_NAME, "input": tool_input, "text": refined_text},
         )
 
         with get_connection() as connection:
@@ -406,12 +421,18 @@ def process_task(task_id: str) -> None:
             connection.commit()
 
         if BOT_CALLBACK_URL.strip():
-            payload = {
-                "task_id": task_id,
-                "status": "DELIVERED",
-                "summary": delivered_task["final_summary"],
-                "audio_uri": delivered_task["final_audio_uri"],
-            }
+            with get_connection() as connection:
+                delivered_task = connection.execute(
+                    "SELECT * FROM tasks WHERE id = ?", (task_id,)
+                ).fetchone()
+                payload = {
+                    "task_id": task_id,
+                    "status": "DELIVERED",
+                    "summary": delivered_task["final_summary"],
+                    "audio_uri": delivered_task["final_audio_uri"],
+                    "chat_id": delivered_task["source_chat_id"],
+                    "task": row_to_task(delivered_task, connection),
+                }
             try:
                 requests.post(BOT_CALLBACK_URL, json=payload, timeout=UPSTREAM_TIMEOUT_SECONDS)
             except requests.RequestException as callback_error:
@@ -527,6 +548,7 @@ def create_task() -> tuple:
     input_type = payload.get("input_type")
     raw_text = payload.get("raw_text")
     raw_audio_uri = payload.get("raw_audio_uri")
+    source_chat_id = payload.get("source_chat_id")
 
     if input_type not in {"text", "voice"}:
         abort(400, description="Field 'input_type' must be one of: text, voice")
@@ -548,8 +570,8 @@ def create_task() -> tuple:
             INSERT INTO tasks (
                 id, project_id, input_type, raw_text, raw_audio_uri,
                 transcript, refined_text, status, final_summary,
-                final_audio_uri, failure_reason, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                final_audio_uri, source_chat_id, failure_reason, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -562,6 +584,7 @@ def create_task() -> tuple:
                 status,
                 None,
                 None,
+                source_chat_id,
                 None,
                 now,
                 now,

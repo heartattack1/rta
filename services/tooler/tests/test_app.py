@@ -236,3 +236,18 @@ def test_git_autocommit_requires_git_repo(tmp_path):
     assert final is not None
     assert final["status"] == "FAILED"
     assert "not a git repository" in final["stderr_tail"]
+
+
+def test_tooler_run_sync_dummy():
+    client = app.test_client()
+
+    response = client.post(
+        "/tooler/run",
+        json={"text": "hello from tracker", "tool_name": "dummy", "input": {"sleep_seconds": 0}},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["tool"] == "dummy"
+    assert payload["exit_code"] == 0
+    assert "start: hello from tracker" in payload["result_text"]
