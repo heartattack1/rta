@@ -1,0 +1,58 @@
+version: "3.9"
+
+services:
+  telegram-bot:
+    build: ./services/telegram-bot
+    environment:
+      PORT: 8000
+      SERVICE_NAME: telegram-bot
+    ports:
+      - "8001:8000"
+
+  tracker:
+    build: ./services/tracker
+    environment:
+      PORT: 8000
+      SERVICE_NAME: tracker
+    ports:
+      - "8002:8000"
+
+  tooler:
+    build: ./services/tooler
+    environment:
+      PORT: 8000
+      SERVICE_NAME: tooler
+    ports:
+      - "8003:8000"
+
+  asr:
+    build: ./services/asr
+    environment:
+      PORT: 8000
+      SERVICE_NAME: asr
+    ports:
+      - "8004:8000"
+
+  refine:
+    build: ./services/refine
+    environment:
+      PORT: 8000
+      SERVICE_NAME: refine
+    ports:
+      - "8005:8000"
+
+  summarizer:
+    build: ./services/summarizer
+    environment:
+      PORT: 8000
+      SERVICE_NAME: summarizer
+    ports:
+      - "8006:8000"
+
+  tts:
+    build: ./services/tts
+    environment:
+      PORT: 8000
+      SERVICE_NAME: tts
+    ports:
+      - "8007:8000"
