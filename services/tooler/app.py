@@ -17,6 +17,7 @@ SERVICE_NAME = os.getenv("SERVICE_NAME", "service")
 ARTIFACTS_DIR = Path(os.getenv("TOOLER_ARTIFACTS_DIR", "/tmp/tooler-artifacts"))
 RUN_AS_USER = os.getenv("TOOLER_RUN_AS_USER", "").strip()
 TAIL_LINES = int(os.getenv("TOOLER_TAIL_LINES", "40"))
+CODEX_API_KEY = os.getenv("CODEX_API_KEY", "").strip()
 
 
 @dataclass
@@ -35,6 +36,43 @@ class ToolRun:
     started_at: float | None = None
     finished_at: float | None = None
     callback_sent: bool = False
+    startup_error: str | None = None
+
+
+@dataclass(frozen=True)
+class ToolAdapterResult:
+    command: list[str] | None = None
+    startup_error: str | None = None
+
+
+def _build_dummy_adapter(payload: dict[str, Any]) -> ToolAdapterResult:
+    return ToolAdapterResult(command=_build_dummy_command(payload))
+
+
+def _build_codex_adapter(payload: dict[str, Any]) -> ToolAdapterResult:
+    prompt = str(payload.get("prompt", "")).strip()
+    if not prompt:
+        abort(400, description="Field 'input.prompt' is required for tool 'codex'")
+
+    if not CODEX_API_KEY:
+        return ToolAdapterResult(
+            startup_error=(
+                "Tool 'codex' is not configured: set CODEX_API_KEY environment variable"
+            )
+        )
+
+    script = (
+        "echo \"codex tool invoked\"; "
+        "echo \"prompt: {prompt}\"; "
+        "echo \"CODEX_API_KEY is configured\""
+    ).format(prompt=prompt.replace('"', "'"))
+    return ToolAdapterResult(command=["bash", "-c", script])
+
+
+TOOL_ADAPTERS: dict[str, Any] = {
+    "dummy": _build_dummy_adapter,
+    "codex": _build_codex_adapter,
+}
 
 
 _tool_runs: dict[str, ToolRun] = {}
@@ -65,10 +103,20 @@ def _build_dummy_command(payload: dict[str, Any]) -> list[str]:
     return ["bash", "-c", script]
 
 
-def _resolve_command(tool_name: str, payload: dict[str, Any]) -> list[str]:
-    if tool_name == "dummy":
-        return _build_dummy_command(payload)
-    abort(400, description=f"Tool '{tool_name}' is not allowed")
+def _resolve_tool_adapter(tool_name: str, payload: dict[str, Any]) -> ToolAdapterResult:
+    adapter = TOOL_ADAPTERS.get(tool_name)
+    if adapter is None:
+        allowed = ", ".join(sorted(TOOL_ADAPTERS))
+        abort(400, description=f"Tool '{tool_name}' is not allowed. Allowed tools: {allowed}")
+
+    result = adapter(payload)
+    if result.command is None and result.startup_error is None:
+        abort(500, description=f"Tool '{tool_name}' adapter returned invalid configuration")
+
+    if result.command is not None and result.startup_error is not None:
+        abort(500, description=f"Tool '{tool_name}' adapter returned ambiguous configuration")
+
+    return result
 
 
 def _preexec_for_user() -> Any:
@@ -113,7 +161,7 @@ def _send_callback(run: ToolRun) -> None:
         app.logger.warning("Tool callback failed for run %s: %s", run.id, error)
 
 
-def _runner_thread(run_id: str, command: list[str]) -> None:
+def _runner_thread(run_id: str, command: list[str] | None) -> None:
     with _tool_runs_lock:
         run = _tool_runs.get(run_id)
 
@@ -122,6 +170,22 @@ def _runner_thread(run_id: str, command: list[str]) -> None:
 
     run.status = "RUNNING"
     run.started_at = time.time()
+
+    if run.startup_error:
+        run.status = "FAILED"
+        run.exit_code = -1
+        run.finished_at = time.time()
+        run.stderr_path.write_text(f"{run.startup_error}\n", encoding="utf-8")
+        _send_callback(run)
+        return
+
+    if command is None:
+        run.status = "FAILED"
+        run.exit_code = -1
+        run.finished_at = time.time()
+        run.stderr_path.write_text("Tool command is not configured\n", encoding="utf-8")
+        _send_callback(run)
+        return
 
     preexec_fn = None
     if RUN_AS_USER:
@@ -203,7 +267,7 @@ def create_tool_run() -> tuple:
     input_payload = payload.get("input") if isinstance(payload.get("input"), dict) else {}
     callback_url = str(payload.get("callback_url", "")).strip() or None
 
-    command = _resolve_command(tool_name, input_payload)
+    adapter_result = _resolve_tool_adapter(tool_name, input_payload)
 
     run_id = str(uuid.uuid4())
     run_dir = ARTIFACTS_DIR / run_id
@@ -220,6 +284,7 @@ def create_tool_run() -> tuple:
         stderr_path=stderr_path,
         callback_url=callback_url,
         artifacts=[str(stdout_path), str(stderr_path)],
+        startup_error=adapter_result.startup_error,
     )
 
     with _tool_runs_lock:
@@ -227,7 +292,7 @@ def create_tool_run() -> tuple:
 
     thread = threading.Thread(
         target=_runner_thread,
-        args=(run_id, command),
+        args=(run_id, adapter_result.command),
         daemon=True,
         name=f"tool-runner-{run_id[:8]}",
     )

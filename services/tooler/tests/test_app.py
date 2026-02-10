@@ -99,3 +99,44 @@ def test_callback_sent_on_finish():
     assert received["tool_run_id"] == run_id
     assert received["status"] == "SUCCEEDED"
     assert isinstance(received["artifacts"], list)
+
+
+def test_codex_tool_without_key_fails_gracefully(monkeypatch):
+    import app as tooler_app
+
+    monkeypatch.setattr(tooler_app, "CODEX_API_KEY", "")
+    client = tooler_app.app.test_client()
+
+    create_response = client.post(
+        "/tool-runs",
+        json={"tool_name": "codex", "input": {"prompt": "summarize this"}},
+    )
+
+    assert create_response.status_code == 201
+    run_id = create_response.get_json()["tool_run_id"]
+
+    final = None
+    for _ in range(20):
+        payload = client.get(f"/tool-runs/{run_id}").get_json()
+        if payload["status"] in {"SUCCEEDED", "FAILED"}:
+            final = payload
+            break
+        time.sleep(0.05)
+
+    assert final is not None
+    assert final["status"] == "FAILED"
+    assert final["exit_code"] == -1
+    assert "not configured" in final["stderr_tail"]
+
+
+def test_codex_tool_requires_prompt(monkeypatch):
+    import app as tooler_app
+
+    monkeypatch.setattr(tooler_app, "CODEX_API_KEY", "test-key")
+    client = tooler_app.app.test_client()
+
+    response = client.post("/tool-runs", json={"tool_name": "codex", "input": {}})
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert "input.prompt" in payload["message"]
