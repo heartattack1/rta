@@ -6,6 +6,10 @@ services:
     environment:
       PORT: 8000
       SERVICE_NAME: telegram-bot
+      TRACKER_URL: http://tracker:8000
+      STORAGE_DIR: /app/storage/telegram
+    volumes:
+      - ./storage:/app/storage
     ports:
       - "8001:8000"
 
@@ -14,6 +18,11 @@ services:
     environment:
       PORT: 8000
       SERVICE_NAME: tracker
+      DATABASE_URL: sqlite:////tmp/tracker.db
+      BOT_CALLBACK_URL: http://telegram-bot:8000/callbacks/task-result
+      SYNC_TOOL_NAME: ${SYNC_TOOL_NAME:-dummy}
+      SYNC_GIT_WORKDIR: /workspace/rta
+      SYNC_GIT_SUBJECT_PREFIX: "chore(voice):"
     ports:
       - "8002:8000"
 
@@ -22,6 +31,10 @@ services:
     environment:
       PORT: 8000
       SERVICE_NAME: tooler
+      TOOLER_ARTIFACTS_DIR: /tmp/tooler-artifacts
+      GIT_PUSH: "false"
+    volumes:
+      - ./:/workspace/rta
     ports:
       - "8003:8000"
 

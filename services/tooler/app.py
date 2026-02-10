@@ -190,6 +190,51 @@ def _resolve_tool_adapter(tool_name: str, payload: dict[str, Any]) -> ToolAdapte
     return result
 
 
+def _run_sync_tool(tool_name: str, input_payload: dict[str, Any]) -> dict[str, Any]:
+    adapter_result = _resolve_tool_adapter(tool_name, input_payload)
+    if adapter_result.startup_error:
+        abort(400, description=adapter_result.startup_error)
+
+    command = adapter_result.command
+    if command is None:
+        abort(500, description=f"Tool '{tool_name}' command is not configured")
+
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    stdout_text = completed.stdout or ""
+    stderr_text = completed.stderr or ""
+
+    response: dict[str, Any] = {
+        "tool": tool_name,
+        "exit_code": completed.returncode,
+        "result_text": stdout_text.strip(),
+        "stderr": stderr_text.strip(),
+    }
+
+    if tool_name == "git-autocommit":
+        branch = None
+        commit_hash = None
+        clean_stdout_lines: list[str] = []
+        for line in stdout_text.splitlines():
+            if line.startswith("__BRANCH__="):
+                branch = line.split("=", 1)[1].strip() or None
+                continue
+            if line.startswith("__COMMIT_HASH__="):
+                commit_hash = line.split("=", 1)[1].strip() or None
+                continue
+            clean_stdout_lines.append(line)
+
+        response["result_text"] = "\n".join(clean_stdout_lines).strip()
+        if branch:
+            response["branch"] = branch
+        if commit_hash:
+            response["commit_hash"] = commit_hash
+
+    if completed.returncode != 0:
+        abort(500, description=(stderr_text.strip() or "Tool execution failed"))
+
+    return response
+
+
 def _preexec_for_user() -> Any:
     if not RUN_AS_USER:
         return None
@@ -333,12 +378,18 @@ def health() -> tuple:
 @app.post("/tooler/run")
 def run_tooler() -> tuple:
     payload = request.get_json(silent=True) or {}
-    text = payload.get("text")
-    if not isinstance(text, str) or not text.strip():
-        abort(400, description="Field 'text' is required")
+    tool_name = str(payload.get("tool_name") or "dummy").strip() or "dummy"
+    input_payload = payload.get("input")
 
-    result_text = text.strip()
-    return jsonify({"result_text": result_text, "tool": "noop"}), 200
+    if not isinstance(input_payload, dict):
+        input_payload = {}
+
+    text = payload.get("text")
+    if isinstance(text, str) and text.strip() and "message" not in input_payload:
+        input_payload["message"] = text.strip()
+
+    result = _run_sync_tool(tool_name, input_payload)
+    return jsonify(result), 200
 
 
 @app.post("/tool-runs")
