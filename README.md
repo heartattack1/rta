@@ -8,7 +8,7 @@ RTA — это dev-ориентированный монорепозиторий
 ### Что это за система
 
 Система состоит из 7 сервисов в `services/` и JSON-контрактов в `packages/contracts`.  
-`telegram-bot` принимает webhook-обновления, создает `project/task` в `tracker`, а затем получает callback о завершении и отправляет ответ пользователю. `tracker` хранит состояние в SQLite, ведет историю статусов и выполняет синхронную оркестрацию пайплайна через `asr`, `refine`, `tooler`, `summarizer`, `tts`.
+`telegram-bot` по умолчанию получает обновления через long polling (`getUpdates`), создает `project/task` в `tracker`, а затем получает callback о завершении и отправляет ответ пользователю. `tracker` хранит состояние в SQLite, ведет историю статусов и выполняет синхронную оркестрацию пайплайна через `asr`, `refine`, `tooler`, `summarizer`, `tts`.
 
 ### Контекст и компоненты
 
@@ -26,7 +26,7 @@ flowchart LR
     FS[(Local FS\nstorage/*)]
     GIT[(Git repo\n/workspace/rta)]
 
-    TG -->|Webhook update| BOT
+    TG -->|getUpdates polling| BOT
     BOT -->|POST /tasks, /projects| TR
     TR --> DB
 
@@ -47,7 +47,7 @@ flowchart LR
 ### Как работает пайплайн
 
 #### Сценарий text
-1. `telegram-bot` получает `/webhook` с текстом, создает/кэширует проект через `POST /projects`, затем создает задачу `POST /tasks` с `input_type=text`.
+1. `telegram-bot` получает обновление из Telegram API через `getUpdates`, создает/кэширует проект через `POST /projects`, затем создает задачу `POST /tasks` с `input_type=text`.
 2. `tracker` создает задачу со статусом `RECEIVED`, кладет `task_id` во внутреннюю очередь (`queue.Queue`) и worker начинает обработку.
 3. `tracker` переводит задачу в `ROUTED` → `REFINING`, вызывает `refine /refine`.
 4. Затем `tracker` делает `TOOL_QUEUED` → `TOOL_RUNNING`, создает запись `tool_runs` и вызывает `tooler /tooler/run`.
@@ -66,7 +66,7 @@ sequenceDiagram
     participant SM as summarizer
     participant TTS as tts
 
-    TG->>BOT: POST /webhook (voice)
+    BOT->>TG: GET getUpdates (voice update)
     BOT->>TG: getFile + download file
     BOT->>TR: POST /projects (once, cached)
     BOT->>TR: POST /tasks {input_type: voice, raw_audio_uri, source_chat_id}
@@ -160,7 +160,7 @@ flowchart TB
 
 | Сервис | Назначение | Порт (host→container) | Ключевые endpoint'ы |
 |---|---|---|---|
-| `telegram-bot` | Принимает Telegram webhook, создает задачи в tracker, отправляет результаты обратно в Telegram | `8001→8000` | `POST /webhook`, `POST /callbacks/task-result`, `GET /health` |
+| `telegram-bot` | По умолчанию получает Telegram updates через polling (`getUpdates`), создает задачи в tracker, отправляет результаты обратно в Telegram | `8001→8000` | `POST /webhook` (опционально, только mode=webhook), `POST /callbacks/task-result`, `GET /health` |
 | `tracker` | Оркестратор пайплайна + SQLite-хранилище проектов/задач/tool-runs + status history | `8002→8000` | `POST /projects`, `GET /projects`, `POST /tasks`, `GET/PATCH /tasks/<id>`, `POST /tool-runs`, `GET /tool-runs/<id>`, `GET /health` |
 | `tooler` | Запуск инструментов (`dummy`, `codex`, `git-autocommit`), sync и async API | `8003→8000` | `POST /tooler/run`, `POST /tool-runs`, `GET /tool-runs/<id>`, `GET /health` |
 | `asr` | Транскрибация аудио (`audio_uri`) в текст | `8004→8000` | `POST /asr/transcribe`, `GET /health` |
@@ -218,7 +218,27 @@ docker compose up --build -d
 
 ## Полезные директории
 
-- `services/telegram-bot/` — прием webhook и отправка ответа в Telegram.
+### Telegram updates mode (локальный запуск)
+
+`telegram-bot` теперь использует `TELEGRAM_UPDATES_MODE`:
+
+- `polling` (по умолчанию) — long polling через `getUpdates`; подходит для локальной разработки без публичного HTTPS.
+- `webhook` — включает прием `POST /webhook` и отключает polling.
+
+Переменные окружения в `docker-compose.yml`:
+
+- `TELEGRAM_TOKEN` — токен бота (обязателен для приема/ответов).
+- `TELEGRAM_UPDATES_MODE` — режим приема (`polling` по умолчанию).
+
+При старте в режиме polling бот автоматически вызывает `deleteWebhook?drop_pending_updates=true`, чтобы убрать ранее установленный webhook.
+
+Если нужно сделать это вручную:
+
+```bash
+curl "https://api.telegram.org/bot<token>/deleteWebhook?drop_pending_updates=true"
+```
+
+- `services/telegram-bot/` — прием обновлений Telegram (polling/webhook) и отправка ответа.
 - `services/tracker/` — доменная модель задач и оркестрация пайплайна.
 - `services/tracker/sql/schema.sql` — схема SQLite.
 - `services/tooler/` — запуск инструментов, включая `git-autocommit`.

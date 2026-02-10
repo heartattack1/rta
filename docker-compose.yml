@@ -8,6 +8,8 @@ services:
       SERVICE_NAME: telegram-bot
       TRACKER_URL: http://tracker:8000
       STORAGE_DIR: /app/storage/telegram
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:-}
+      TELEGRAM_UPDATES_MODE: ${TELEGRAM_UPDATES_MODE:-polling}
     volumes:
       - ./storage:/app/storage
     ports:
