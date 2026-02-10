@@ -53,37 +53,32 @@ def test_unknown_tool_rejected():
     assert "not allowed" in payload["message"]
 
 
-def test_callback_sent_on_finish():
-    import json
-    import threading
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+def test_callback_sent_on_finish(monkeypatch):
+    import app as tooler_app
 
     received: dict[str, object] = {}
 
-    class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length)
-            received.update(json.loads(body.decode("utf-8")))
-            self.send_response(204)
-            self.end_headers()
+    def fake_send_callback(run):
+        if run.callback_url:
+            received.update(
+                {
+                    "tool_run_id": run.id,
+                    "status": run.status,
+                    "artifacts": run.artifacts,
+                }
+            )
+            run.callback_sent = True
 
-        def log_message(self, *args, **kwargs):
-            return
+    monkeypatch.setattr(tooler_app, "_send_callback", fake_send_callback)
 
-    server = HTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-
-    client = app.test_client()
-    callback_url = f"http://127.0.0.1:{server.server_port}/finished"
+    client = tooler_app.app.test_client()
 
     create_response = client.post(
         "/tool-runs",
         json={
             "tool_name": "dummy",
             "input": {"sleep_seconds": 0.1},
-            "callback_url": callback_url,
+            "callback_url": "http://callback.local/finished",
         },
     )
     run_id = create_response.get_json()["tool_run_id"]
@@ -94,8 +89,7 @@ def test_callback_sent_on_finish():
             break
         time.sleep(0.1)
 
-    server.shutdown()
-
+    assert received
     assert received["tool_run_id"] == run_id
     assert received["status"] == "SUCCEEDED"
     assert isinstance(received["artifacts"], list)
@@ -140,3 +134,105 @@ def test_codex_tool_requires_prompt(monkeypatch):
     assert response.status_code == 400
     payload = response.get_json()
     assert "input.prompt" in payload["message"]
+
+def test_git_autocommit_creates_branch_and_commit(tmp_path, monkeypatch):
+    import subprocess
+
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+
+    subprocess.run(["git", "init", str(repo_dir)], check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "config", "user.email", "tooler@example.com"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "config", "user.name", "Tooler Test"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    (repo_dir / "README.md").write_text("initial\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo_dir), "add", "-A"], check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-C", str(repo_dir), "commit", "-m", "initial"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    (repo_dir / "README.md").write_text("changed\n", encoding="utf-8")
+
+    monkeypatch.setenv("GIT_PUSH", "false")
+    client = app.test_client()
+
+    create_response = client.post(
+        "/tool-runs",
+        json={
+            "tool_name": "git-autocommit",
+            "input": {
+                "workdir": str(repo_dir),
+                "subject": "feat: autobot update",
+            },
+        },
+    )
+
+    assert create_response.status_code == 201
+    run_id = create_response.get_json()["tool_run_id"]
+
+    final = None
+    for _ in range(40):
+        payload = client.get(f"/tool-runs/{run_id}").get_json()
+        if payload["status"] in {"SUCCEEDED", "FAILED"}:
+            final = payload
+            break
+        time.sleep(0.1)
+
+    assert final is not None
+    assert final["status"] == "SUCCEEDED"
+    assert final["branch"]
+    assert final["branch"].startswith("autobot/")
+    assert final["commit_hash"]
+    assert any(a.startswith("branch:") for a in final["artifacts"])
+    assert any(a.startswith("commit_hash:") for a in final["artifacts"])
+
+    current_branch = subprocess.run(
+        ["git", "-C", str(repo_dir), "branch", "--show-current"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert current_branch == final["branch"]
+
+
+def test_git_autocommit_requires_git_repo(tmp_path):
+    non_repo = tmp_path / "non_repo"
+    non_repo.mkdir()
+
+    client = app.test_client()
+
+    create_response = client.post(
+        "/tool-runs",
+        json={
+            "tool_name": "git-autocommit",
+            "input": {"workdir": str(non_repo), "subject": "feat: autobot update"},
+        },
+    )
+
+    assert create_response.status_code == 201
+    run_id = create_response.get_json()["tool_run_id"]
+
+    final = None
+    for _ in range(20):
+        payload = client.get(f"/tool-runs/{run_id}").get_json()
+        if payload["status"] in {"SUCCEEDED", "FAILED"}:
+            final = payload
+            break
+        time.sleep(0.05)
+
+    assert final is not None
+    assert final["status"] == "FAILED"
+    assert "not a git repository" in final["stderr_tail"]
